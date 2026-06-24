@@ -58,14 +58,24 @@ async def send_request(encrypted_uid, token, url):
             'Expect': "100-continue",
             'X-Unity-Version': "2022.3.47f1",
             'X-GA': "v1 1",
-            'ReleaseVersion': "OB53"
+            'ReleaseVersion': "OB54"
         }
+        
+        # Log request (tapi hati-hati jangan terlalu banyak)
+        app.logger.debug(f"Sending request to {url}")
+        
         async with aiohttp.ClientSession() as session:
             async with session.post(url, data=edata, headers=headers) as response:
+                response_text = await response.text()
+                
+                # Log response
+                app.logger.debug(f"Response status: {response.status}")
                 if response.status != 200:
-                    app.logger.error(f"Request failed with status code: {response.status}")
-                    return response.status
-                return await response.text()
+                    app.logger.warning(f"Request failed: {response.status} - {response_text[:100]}")
+                else:
+                    app.logger.debug(f"Request success: {response.status}")
+                    
+                return response.status
     except Exception as e:
         app.logger.error(f"Exception in send_request: {e}")
         return None
@@ -182,7 +192,6 @@ def handle_requests():
     if not uid:
         return jsonify({"error": "UID is required"}), 400
 
-    # Validasi UID (harus 8-10 digit)
     if not uid.isdigit() or len(uid) < 8 or len(uid) > 15:
         return jsonify({"error": "Invalid UID. Must be 8-15 digits"}), 400
 
@@ -190,12 +199,10 @@ def handle_requests():
         tokens = load_tokens()
         if tokens is None or not tokens:
             return jsonify({"error": "Failed to load tokens."}), 500
-        token = tokens[0]['token']
         
-        # Normalisasi server_name ke uppercase
+        token = tokens[0]['token']
         server_name = request.args.get("server_name", "").upper()
         
-        # Jika server_name tidak diberikan, ambil dari token
         if not server_name:
             try:
                 payload = token.split('.')[1]
@@ -203,12 +210,12 @@ def handle_requests():
                 decoded_payload = base64.urlsafe_b64decode(payload).decode('utf-8')
                 parsed_payload = json.loads(decoded_payload)
                 server_name = parsed_payload.get('lock_region', '').upper()
-                app.logger.info(f"Server name from token: {server_name}")
             except Exception as e:
                 app.logger.error(f"Error decoding token payload: {e}")
+                return jsonify({"error": "Could not determine region from token"}), 400
         
         if not server_name:
-            return jsonify({"error": "server_name could not be determined from token or input"}), 400
+            return jsonify({"error": "server_name could not be determined"}), 400
         
         app.logger.info(f"Processing UID: {uid}, Server: {server_name}")
         
@@ -219,49 +226,95 @@ def handle_requests():
         # Get before likes
         before = make_request(encrypted_uid, server_name, token)
         if before is None:
-            return jsonify({"error": "Failed to retrieve player info. Check tokens.json"}), 500
+            return jsonify({
+                "error": "Failed to retrieve player info",
+                "solution": "Check tokens.json or network connection"
+            }), 500
         
         data_before = json.loads(MessageToJson(before))
-        before_like = int(data_before.get('AccountInfo', {}).get('Likes', 0) or 0)
-        app.logger.info(f"Likes before: {before_like}")
+        account_info_before = data_before.get('AccountInfo', {})
+        before_like = int(account_info_before.get('Likes', 0) or 0)
+        player_name = str(account_info_before.get('PlayerNickname', ''))
+        player_uid = int(account_info_before.get('UID', 0) or 0)
+        
+        app.logger.info(f"✅ Player: {player_name}, UID: {player_uid}")
+        app.logger.info(f"✅ Likes before: {before_like}")
 
         # Tentukan URL untuk like
         if server_name == "IND":
             url = "https://client.ind.freefiremobile.com/LikeProfile"
-        elif server_name in {"BR", "US", "SAC", "NA"}:
+        elif server_name in {"BR", "US", "SAC"}:
             url = "https://client.us.freefiremobile.com/LikeProfile"
         else:
-            # ID dan semua region lainnya pake clientbp.ggpolarbear.com
             url = "https://clientbp.ggpolarbear.com/LikeProfile"
             
-        app.logger.info(f"Using URL: {url}")
+        app.logger.info(f"✅ Using URL: {url}")
 
         # Send like requests
+        app.logger.info("🔄 Sending like requests...")
         requests_sent = asyncio.run(send_multiple_requests(uid, server_name, url))
-        app.logger.info(f"Requests sent: {requests_sent}")
+        
+        # Debug: Cek hasil request
+        if requests_sent:
+            success_count = sum(1 for r in requests_sent if r and r == 200)
+            error_count = sum(1 for r in requests_sent if r and r != 200)
+            app.logger.info(f"✅ Requests sent: {len(requests_sent)} total")
+            app.logger.info(f"✅ Success: {success_count}, Failed: {error_count}")
+            
+            # Log beberapa error
+            for i, result in enumerate(requests_sent[:5]):
+                if result and result != 200:
+                    app.logger.warning(f"Request {i+1} failed with status: {result}")
+        else:
+            app.logger.error("❌ No requests were sent!")
 
         # Get after likes
+        app.logger.info("🔄 Getting after likes...")
         after = make_request(encrypted_uid, server_name, token)
         if after is None:
             return jsonify({"error": "Failed to retrieve player info after likes."}), 500
         
         data_after = json.loads(MessageToJson(after))
-        account_info = data_after.get('AccountInfo', {})
-        after_like = int(account_info.get('Likes', 0) or 0)
-        player_uid = int(account_info.get('UID', 0) or 0)
-        player_name = str(account_info.get('PlayerNickname', ''))
+        account_info_after = data_after.get('AccountInfo', {})
+        after_like = int(account_info_after.get('Likes', 0) or 0)
+        
+        app.logger.info(f"✅ Likes after: {after_like}")
         
         like_given = after_like - before_like
+        app.logger.info(f"✅ Likes given: {like_given}")
+        
+        # Cek apakah UID sama (untuk memastikan tidak salah UID)
+        after_uid = int(account_info_after.get('UID', 0) or 0)
+        if after_uid != player_uid:
+            app.logger.warning(f"⚠️ UID mismatch! Before: {player_uid}, After: {after_uid}")
+        
+        if like_given > 0:
+            status_message = f"Successfully sent {like_given} likes!"
+            status_code = 1
+        elif like_given == 0:
+            status_message = "No likes sent. Possible reasons:"
+            status_message += "\n- Target account may have reached daily like limit"
+            status_message += "\n- Token may not have permission to like"
+            status_message += "\n- Already liked this account today"
+            status_message += "\n- Server rejected the like requests"
+            status_code = 2
+        else:
+            status_message = "Error: Likes decreased!"
+            status_code = 0
         
         return jsonify({
-            "credit": "https://t.me/upustrx",
+            "credit": "https://t.me/paglu_dev",
+            "status": status_code,
+            "message": status_message,
+            "PlayerNickname": player_name,
+            "UID": player_uid,
+            "Region": server_name,
             "LikesGivenByAPI": like_given,
             "LikesafterCommand": after_like,
             "LikesbeforeCommand": before_like,
-            "PlayerNickname": player_name,
-            "Region": server_name,
-            "UID": player_uid,
-            "status": 1 if like_given > 0 else 2
+            "RequestsTotal": len(requests_sent) if requests_sent else 0,
+            "RequestsSuccess": success_count if requests_sent else 0,
+            "RequestsFailed": error_count if requests_sent else 0
         })
     except Exception as e:
         app.logger.error(f"Error processing request: {e}")
