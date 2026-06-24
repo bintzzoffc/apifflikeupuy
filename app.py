@@ -58,7 +58,7 @@ async def send_request(encrypted_uid, token, url):
             'Expect': "100-continue",
             'X-Unity-Version': "2022.3.47f1",
             'X-GA': "v1 1",
-            'ReleaseVersion': "OB54"
+            'ReleaseVersion': "OB53"
         }
         async with aiohttp.ClientSession() as session:
             async with session.post(url, data=edata, headers=headers) as response:
@@ -114,12 +114,17 @@ def enc(uid):
 
 def make_request(encrypt, server_name, token):
     try:
+        # Normalisasi server_name ke uppercase
+        server_name = server_name.upper()
+        
         if server_name == "IND":
             url = "https://client.ind.freefiremobile.com/GetPlayerPersonalShow"
         elif server_name in {"BR", "US", "SAC", "NA"}:
             url = "https://client.us.freefiremobile.com/GetPlayerPersonalShow"
         else:
+            # ID dan semua region lainnya pake clientbp.ggpolarbear.com
             url = "https://clientbp.ggpolarbear.com/GetPlayerPersonalShow"
+            
         edata = bytes.fromhex(encrypt)
         headers = {
             'User-Agent': "UnityPlayer/2022.3.47f1 (UnityWebRequest/1.0, libcurl/8.5.0-DEV)",
@@ -130,14 +135,19 @@ def make_request(encrypt, server_name, token):
             'Expect': "100-continue",
             'X-Unity-Version': "2022.3.47f1",
             'X-GA': "v1 1",
-            'ReleaseVersion': "OB54"
+            'ReleaseVersion': "OB53"
         }
+        
+        app.logger.info(f"Making request to: {url}")  # Debug log
         response = requests.post(url, data=edata, headers=headers, verify=False)
+        
+        if response.status_code != 200:
+            app.logger.error(f"Request failed with status: {response.status_code}")
+            return None
+            
         hex_data = response.content.hex()
         binary = bytes.fromhex(hex_data)
         decode = decode_protobuf(binary)
-        if decode is None:
-            app.logger.error("Protobuf decoding returned None.")
         return decode
     except Exception as e:
         app.logger.error(f"Error in make_request: {e}")
@@ -158,7 +168,7 @@ def decode_protobuf(binary):
 @app.route('/', methods=['GET'])
 def index():
     return jsonify({
-        "credit": "https://t.me/paglu_dev",
+        "credit": "https://t.me/upuystrx",
         "message": "Welcome to the Free Fire Like API",
         "status": "API is running",
         "endpoints": "/like?uid=<uid> or /like?uid=<uid>&server_name=<server_name>",
@@ -172,14 +182,20 @@ def handle_requests():
     if not uid:
         return jsonify({"error": "UID is required"}), 400
 
+    # Validasi UID (harus 8-10 digit)
+    if not uid.isdigit() or len(uid) < 8 or len(uid) > 15:
+        return jsonify({"error": "Invalid UID. Must be 8-15 digits"}), 400
+
     try:
         tokens = load_tokens()
         if tokens is None or not tokens:
             return jsonify({"error": "Failed to load tokens."}), 500
         token = tokens[0]['token']
         
-        # Extract server_name (lock_region) from token if not provided
+        # Normalisasi server_name ke uppercase
         server_name = request.args.get("server_name", "").upper()
+        
+        # Jika server_name tidak diberikan, ambil dari token
         if not server_name:
             try:
                 payload = token.split('.')[1]
@@ -187,38 +203,44 @@ def handle_requests():
                 decoded_payload = base64.urlsafe_b64decode(payload).decode('utf-8')
                 parsed_payload = json.loads(decoded_payload)
                 server_name = parsed_payload.get('lock_region', '').upper()
+                app.logger.info(f"Server name from token: {server_name}")
             except Exception as e:
                 app.logger.error(f"Error decoding token payload: {e}")
         
         if not server_name:
             return jsonify({"error": "server_name could not be determined from token or input"}), 400
         
+        app.logger.info(f"Processing UID: {uid}, Server: {server_name}")
+        
         encrypted_uid = enc(uid)
         if encrypted_uid is None:
             return jsonify({"error": "Encryption of UID failed."}), 500
 
-        # Get before likes count
+        # Get before likes
         before = make_request(encrypted_uid, server_name, token)
         if before is None:
-            return jsonify({"error": "Failed to retrieve player info. There are no valid token found! please update tokens.json with valid tokens"}), 500
+            return jsonify({"error": "Failed to retrieve player info. Check tokens.json"}), 500
         
         data_before = json.loads(MessageToJson(before))
         before_like = int(data_before.get('AccountInfo', {}).get('Likes', 0) or 0)
         app.logger.info(f"Likes before: {before_like}")
 
-        # Determine URL based on server
+        # Tentukan URL untuk like
         if server_name == "IND":
             url = "https://client.ind.freefiremobile.com/LikeProfile"
         elif server_name in {"BR", "US", "SAC", "NA"}:
             url = "https://client.us.freefiremobile.com/LikeProfile"
         else:
+            # ID dan semua region lainnya pake clientbp.ggpolarbear.com
             url = "https://clientbp.ggpolarbear.com/LikeProfile"
+            
+        app.logger.info(f"Using URL: {url}")
 
         # Send like requests
         requests_sent = asyncio.run(send_multiple_requests(uid, server_name, url))
         app.logger.info(f"Requests sent: {requests_sent}")
 
-        # Get after likes count
+        # Get after likes
         after = make_request(encrypted_uid, server_name, token)
         if after is None:
             return jsonify({"error": "Failed to retrieve player info after likes."}), 500
@@ -232,7 +254,7 @@ def handle_requests():
         like_given = after_like - before_like
         
         return jsonify({
-            "credit": "https://t.me/paglu_dev",
+            "credit": "https://t.me/upustrx",
             "LikesGivenByAPI": like_given,
             "LikesafterCommand": after_like,
             "LikesbeforeCommand": before_like,
@@ -244,6 +266,6 @@ def handle_requests():
     except Exception as e:
         app.logger.error(f"Error processing request: {e}")
         return jsonify({"error": str(e)}), 500
-
+        
 if __name__ == '__main__':
     app.run(debug=True, use_reloader=False)
