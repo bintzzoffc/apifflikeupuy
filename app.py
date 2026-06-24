@@ -61,19 +61,22 @@ async def send_request(encrypted_uid, token, url):
             'ReleaseVersion': "OB54"
         }
         
-        # Log request (tapi hati-hati jangan terlalu banyak)
-        app.logger.debug(f"Sending request to {url}")
+        # LOG: Tampilkan URL dan token (partial)
+        app.logger.info(f"📤 Sending like to: {url}")
+        app.logger.info(f"🔑 Token: {token[:20]}...")
         
         async with aiohttp.ClientSession() as session:
             async with session.post(url, data=edata, headers=headers) as response:
                 response_text = await response.text()
                 
-                # Log response
-                app.logger.debug(f"Response status: {response.status}")
+                # LOG: Tampilkan response
+                app.logger.info(f"📥 Response status: {response.status}")
+                app.logger.info(f"📄 Response text: {response_text[:200]}")
+                
                 if response.status != 200:
-                    app.logger.warning(f"Request failed: {response.status} - {response_text[:100]}")
+                    app.logger.error(f"❌ Like failed: {response.status} - {response_text}")
                 else:
-                    app.logger.debug(f"Request success: {response.status}")
+                    app.logger.info(f"✅ Like success!")
                     
                 return response.status
     except Exception as e:
@@ -82,7 +85,7 @@ async def send_request(encrypted_uid, token, url):
 
 async def send_multiple_requests(uid, server_name, url):
     try:
-        region = server_name
+        region = server_name.upper()
         protobuf_message = create_protobuf_message(uid, region)
         if protobuf_message is None:
             app.logger.error("Failed to create protobuf message.")
@@ -91,15 +94,23 @@ async def send_multiple_requests(uid, server_name, url):
         if encrypted_uid is None:
             app.logger.error("Encryption failed.")
             return None
+            
         tasks = []
         tokens = load_tokens()
         if tokens is None:
             app.logger.error("Failed to load tokens.")
             return None
-        for i in range(100):
+            
+        # Hanya kirim 5 request dulu untuk test
+        for i in range(5):  # Ganti dari 100 ke 5 untuk test
             token = tokens[i % len(tokens)]["token"]
             tasks.append(send_request(encrypted_uid, token, url))
+            
         results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # LOG hasil
+        app.logger.info(f"Results: {results}")
+        
         return results
     except Exception as e:
         app.logger.error(f"Exception in send_multiple_requests: {e}")
