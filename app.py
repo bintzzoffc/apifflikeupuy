@@ -9,6 +9,7 @@ import aiohttp
 import requests
 import json
 import base64
+import time
 import like_pb2
 import like_count_pb2
 import uid_generator_pb2
@@ -73,7 +74,6 @@ async def send_request(encrypted_uid, token, url):
             'ReleaseVersion': "OB54"
         }
         async with aiohttp.ClientSession() as session:
-            # Ditambahkan timeout 15 detik agar tidak hang selamanya
             async with session.post(url, data=edata, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as response:
                 if response.status != 200:
                     body = await response.text()
@@ -89,19 +89,15 @@ async def send_multiple_requests(uid, server_name, url, tokens):
         region = server_name
         protobuf_message = create_protobuf_message(uid, region)
         if protobuf_message is None:
-            app.logger.error("Failed to create protobuf message.")
-            return None
+            return 0
         
         encrypted_uid = encrypt_message(protobuf_message)
         if encrypted_uid is None:
-            app.logger.error("Encryption failed.")
-            return None
+            return 0
         
         tasks = []
-        
-        # Batasi request maksimal 5x per token untuk menghindari rate-limit/banned
         max_requests = min(100, len(tokens) * 5)
-        app.logger.info(f"Sending {max_requests} like requests...")
+        app.logger.info(f"Sending {max_requests} like requests to {url}...")
         
         for i in range(max_requests):
             token = tokens[i % len(tokens)]["token"]
@@ -109,13 +105,12 @@ async def send_multiple_requests(uid, server_name, url, tokens):
             
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        # Hitung berapa request yang sukses
         success = sum(1 for r in results if r is not None and not isinstance(r, Exception))
-        app.logger.info(f"Like sent: {success}/{max_requests} succeeded")
-        return results
+        app.logger.warning(f"✅ Like requests accepted by server: {success}/{max_requests}")
+        return success
     except Exception as e:
         app.logger.error(f"Exception in send_multiple_requests: {e}")
-        return None
+        return 0
 
 def create_protobuf(uid):
     try:
@@ -155,7 +150,6 @@ def make_request(encrypt, server_name, token):
             'X-GA': "v1 1",
             'ReleaseVersion': "OB54"
         }
-        # Ditambahkan timeout 15 detik
         response = requests.post(url, data=edata, headers=headers, verify=False, timeout=15)
         hex_data = response.content.hex()
         binary = bytes.fromhex(hex_data)
@@ -189,7 +183,6 @@ def index():
         "example": "/like?uid=123456789 or /like?uid=123456789&server_name=bd"
     })
 
-# Diubah menjadi async def agar lebih aman di deployment Vercel/Worker
 @app.route('/like', methods=['GET'])
 async def handle_requests():
     uid = request.args.get("uid")
@@ -201,12 +194,10 @@ async def handle_requests():
         if tokens is None or not tokens:
             return jsonify({"error": "Failed to load tokens."}), 500
         
-        # Ambil token pertama yang valid
         token = get_valid_token(tokens)
         if not token:
             return jsonify({"error": "No valid token found in tokens.json"}), 500
         
-        # Extract server_name (lock_region) dari token jika tidak diisi
         server_name = request.args.get("server_name", "").upper()
         if not server_name:
             try:
@@ -243,10 +234,11 @@ async def handle_requests():
             url = "https://clientbp.ggpolarbear.com/LikeProfile"
 
         # Send like requests
-        await send_multiple_requests(uid, server_name, url, tokens)
+        success_count = await send_multiple_requests(uid, server_name, url, tokens)
 
-        # Delay 3 detik agar server FF sempat update like count-nya
-        await asyncio.sleep(3)
+        # Delay 5 detik agar server FF sempat update database like-nya
+        app.logger.info("Waiting 5 seconds for server to update likes...")
+        await asyncio.sleep(5)
 
         # Get after likes count
         after = make_request(encrypted_uid, server_name, token)
@@ -260,6 +252,8 @@ async def handle_requests():
         player_name = str(account_info.get('PlayerNickname', ''))
         
         like_given = after_like - before_like
+        
+        app.logger.warning(f"Before: {before_like} | After: {after_like} | Given: {like_given}")
         
         return jsonify({
             "credit": "https://t.me/paglu_dev",
